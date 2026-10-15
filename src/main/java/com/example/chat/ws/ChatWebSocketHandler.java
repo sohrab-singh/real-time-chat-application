@@ -2,7 +2,6 @@ package com.example.chat.ws;
 
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketSession;
-import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 import org.springframework.web.util.UriComponentsBuilder;
 
@@ -15,10 +14,8 @@ import java.util.regex.Pattern;
 public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private static final String USER_ATTR = "user";
-    private static final String OUTBOUND_ATTR = "outbound";
+    private static final String OUTBOX_ATTR = "outbox";
     private static final Pattern USERNAME = Pattern.compile("[A-Za-z0-9_.-]{1,50}");
-    private static final int SEND_TIME_LIMIT_MS = 5_000;
-    private static final int BUFFER_SIZE_LIMIT = 512 * 1024;
 
     private final SessionRegistry registry;
 
@@ -34,18 +31,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             session.close(CloseStatus.POLICY_VIOLATION.withReason("Missing or invalid ?user="));
             return;
         }
-        // Raw sessions are not safe for concurrent sends; the decorator serializes and buffers them
-        WebSocketSession outbound = new ConcurrentWebSocketSessionDecorator(session, SEND_TIME_LIMIT_MS, BUFFER_SIZE_LIMIT);
+        Outbox outbox = new Outbox(session);
         session.getAttributes().put(USER_ATTR, user);
-        session.getAttributes().put(OUTBOUND_ATTR, outbound);
-        registry.add(user, outbound);
+        session.getAttributes().put(OUTBOX_ATTR, outbox);
+        registry.add(user, outbox);
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String user = (String) session.getAttributes().get(USER_ATTR);
-        if (user != null) {
-            registry.remove(user, (WebSocketSession) session.getAttributes().get(OUTBOUND_ATTR));
+        Outbox outbox = (Outbox) session.getAttributes().get(OUTBOX_ATTR);
+        if (user != null && outbox != null) {
+            registry.remove(user, outbox);
+            outbox.shutdown();
         }
     }
 }

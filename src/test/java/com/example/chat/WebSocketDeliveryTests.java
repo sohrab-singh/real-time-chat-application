@@ -2,6 +2,7 @@ package com.example.chat;
 
 import com.example.chat.service.DirectMessageService;
 import com.example.chat.service.UserService;
+import com.example.chat.ws.Outbox;
 import com.example.chat.ws.SessionRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -22,11 +23,17 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.time.Duration;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class WebSocketDeliveryTests {
@@ -67,10 +74,10 @@ class WebSocketDeliveryTests {
         open.add(session);
         // The client handshake can finish before the server has registered the session
         long deadline = System.currentTimeMillis() + 5_000;
-        while (registry.sessionsOf(user).isEmpty() && System.currentTimeMillis() < deadline) {
+        while (registry.outboxesOf(user).isEmpty() && System.currentTimeMillis() < deadline) {
             Thread.sleep(10);
         }
-        assertThat(registry.sessionsOf(user)).isNotEmpty();
+        assertThat(registry.outboxesOf(user)).isNotEmpty();
         return inbox;
     }
 
@@ -80,6 +87,7 @@ class WebSocketDeliveryTests {
                         URI.create("http://localhost:" + port + "/api/conversations/" + conversationId + "/messages"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
+                .timeout(Duration.ofSeconds(3))
                 .build();
         try (HttpClient http = HttpClient.newHttpClient()) {
             return http.send(request, HttpResponse.BodyHandlers.ofString());
@@ -126,5 +134,35 @@ class WebSocketDeliveryTests {
 
         assertThat(send(dmId, carol, "let me in").statusCode()).isEqualTo(403);
         assertThat(aliceInbox.poll(500, TimeUnit.MILLISECONDS)).isNull();
+    }
+
+    @Test
+    void aStalledClientDelaysNeitherTheSenderNorOtherMembers() throws Exception {
+        String alice = "alice-" + System.nanoTime();
+        String bob = "bob-" + System.nanoTime();
+        Long dmId = dms.getOrCreate(alice, bob).id();
+        BlockingQueue<String> aliceInbox = connect(alice);
+
+        // Bob's connection accepts no data: every write blocks until released
+        CountDownLatch release = new CountDownLatch(1);
+        WebSocketSession stalled = mock(WebSocketSession.class);
+        when(stalled.getId()).thenReturn("stalled");
+        when(stalled.isOpen()).thenReturn(true);
+        doAnswer(invocation -> {
+            release.await();
+            return null;
+        }).when(stalled).sendMessage(any());
+        Outbox stalledOutbox = new Outbox(stalled);
+        registry.add(bob, stalledOutbox);
+        try {
+            long start = System.nanoTime();
+            assertThat(send(dmId, bob, "are you there?").statusCode()).isEqualTo(201);
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(2));
+            assertThat(aliceInbox.poll(5, TimeUnit.SECONDS)).contains("are you there?");
+        } finally {
+            release.countDown();
+            registry.remove(bob, stalledOutbox);
+            stalledOutbox.shutdown();
+        }
     }
 }
