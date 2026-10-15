@@ -6,6 +6,7 @@ import com.example.chat.domain.User;
 import com.example.chat.repository.ConversationRepository;
 import com.example.chat.repository.MembershipRepository;
 import com.example.chat.repository.MessageRepository;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Limit;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -33,17 +34,23 @@ public class MessageService {
     public record HistoryPage(List<MessageView> messages, boolean hasMore) {
     }
 
+    /** Published inside the send transaction; delivered to listeners only once it commits. */
+    public record MessageSentEvent(MessageView message, List<String> recipients) {
+    }
+
     private final ConversationRepository conversations;
     private final MembershipRepository memberships;
     private final MessageRepository messages;
     private final UserService users;
+    private final ApplicationEventPublisher events;
 
     public MessageService(ConversationRepository conversations, MembershipRepository memberships,
-                          MessageRepository messages, UserService users) {
+                          MessageRepository messages, UserService users, ApplicationEventPublisher events) {
         this.conversations = conversations;
         this.memberships = memberships;
         this.messages = messages;
         this.users = users;
+        this.events = events;
     }
 
     /**
@@ -63,7 +70,9 @@ public class MessageService {
         // Checked after taking the lock, so a concurrent leave can't slip in between check and insert
         requireMember(conversationId, sender);
         Message message = messages.save(new Message(conversation, sender, conversation.nextSeq(), content));
-        return MessageView.of(message);
+        MessageView view = MessageView.of(message);
+        events.publishEvent(new MessageSentEvent(view, memberships.findUsernamesByConversationId(conversationId)));
+        return view;
     }
 
     /** Messages with {@code seq > afterSeq}, oldest first. Members only. */
