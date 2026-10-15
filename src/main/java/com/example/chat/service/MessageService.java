@@ -83,7 +83,7 @@ public class MessageService {
         User sender = requireUser(senderName);
         Conversation conversation = conversations.findByIdForUpdate(conversationId)
                 .orElseThrow(() -> notFound(conversationId));
-        // Checked after taking the lock, so a concurrent leave can't slip in between check and insert
+        // Checked under the lock, which leave() also takes, so a concurrent leave can't slip in between check and insert
         requireMember(conversationId, sender);
 
         if (clientMessageId != null) {

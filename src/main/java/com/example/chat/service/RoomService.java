@@ -49,12 +49,17 @@ public class RoomService {
         memberships.insertIfAbsent(room.getId(), user.getId());
     }
 
-    /** Leaving a room you are not in (or as an unknown user) is a no-op. */
+    /**
+     * Leaving a room you are not in (or as an unknown user) is a no-op. Takes the same row lock as
+     * {@code MessageService.send}, so a leave and a send by the same user are strictly ordered: the
+     * send either completes while they are a member, or sees that they have left.
+     */
     @Transactional
     public void leave(Long roomId, String username) {
-        Conversation room = findRoom(roomId);
+        findRoom(roomId);
         if (users.find(username).isPresent()) {
-            memberships.deleteByConversationIdAndUsername(room.getId(), username);
+            conversations.findByIdForUpdate(roomId);
+            memberships.deleteByConversationIdAndUsername(roomId, username);
         }
     }
 
