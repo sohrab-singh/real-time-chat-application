@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; color: #1f2328; background: #f6f8fa; height: 100vh; }
+  button { font: inherit; cursor: pointer; border: 1px solid #d0d7de; background: #fff; border-radius: 6px; padding: 4px 10px; }
+  button:hover { background: #f3f4f6; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  input { font: inherit; border: 1px solid #d0d7de; border-radius: 6px; padding: 6px 8px; }
+  .hidden { display: none !important; }
+
+  #login { display: flex; height: 100vh; align-items: center; justify-content: center; }
+  #login form { background: #fff; padding: 24px; border: 1px solid #d0d7de; border-radius: 8px; display: flex; gap: 8px; flex-direction: column; width: 300px; }
+
+  #app { display: flex; height: 100vh; }
+  aside { width: 280px; background: #fff; border-right: 1px solid #d0d7de; display: flex; flex-direction: column; overflow-y: auto; }
+  aside header { padding: 12px; border-bottom: 1px solid #d0d7de; display: flex; justify-content: space-between; align-items: center; }
+  aside h3 { margin: 16px 12px 4px; font-size: 12px; text-transform: uppercase; color: #656d76; }
+  .item { display: flex; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer; }
+  .item:hover { background: #f6f8fa; }
+  .item.active { background: #ddf4ff; }
+  .item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .meta { color: #656d76; font-size: 12px; }
+  .badge { background: #1f6feb; color: #fff; border-radius: 10px; padding: 0 7px; font-size: 12px; }
+  .item button { padding: 1px 8px; font-size: 12px; }
+  #dm-form { display: flex; gap: 6px; padding: 6px 12px; }
+  #dm-form input { flex: 1; min-width: 0; }
+  #status { font-size: 12px; }
+  #status.online { color: #1a7f37; }
+  #status.offline { color: #cf222e; }
+
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  main header { padding: 12px 16px; background: #fff; border-bottom: 1px solid #d0d7de; }
+  main header .members { color: #656d76; font-size: 12px; }
+  #messages { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  .msg { margin-bottom: 8px; }
+  .msg .who { font-weight: 600; }
+  .msg .when { color: #656d76; font-size: 12px; margin-left: 6px; }
+  .msg .text { white-space: pre-wrap; word-wrap: break-word; }
+  .msg.mine .who { color: #1f6feb; }
+  #composer { display: flex; gap: 8px; padding: 12px 16px; background: #fff; border-top: 1px solid #d0d7de; }
+  #composer input { flex: 1; }
+  .empty { color: #656d76; padding: 24px; text-align: center; }
+  #error { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #cf222e; color: #fff; padding: 8px 14px; border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <form id="login-form">
+    <strong>Choose a username</strong>
+    <input id="login-name" placeholder="e.g. alice" pattern="[A-Za-z0-9_.\-]{1,50}" required autofocus>
+    <button class="primary">Enter</button>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <aside>
+    <header>
+      <div><strong id="me"></strong> <span id="status" class="offline">● offline</span></div>
+      <button id="logout">Log out</button>
+    </header>
+    <h3>Rooms</h3>
+    <div id="rooms"></div>
+    <h3>Direct messages</h3>
+    <form id="dm-form">
+      <input id="dm-name" placeholder="Username" pattern="[A-Za-z0-9_.\-]{1,50}" required>
+      <button>Start</button>
+    </form>
+    <div id="dms"></div>
+  </aside>
+  <main>
+    <header>
+      <div id="title"><strong>Pick a conversation</strong></div>
+      <div id="members" class="members"></div>
+    </header>
+    <div id="messages"><div class="empty">Join a room or start a DM.</div></div>
+    <form id="composer" class="hidden">
+      <input id="text" placeholder="Message" autocomplete="off" maxlength="4000" required>
+      <button class="primary">Send</button>
+    </form>
+  </main>
+</div>
+
+<div id="error" class="hidden"></div>
+
+<script>
+const INITIAL_HISTORY = 100;  // on first load, show at most this many recent messages per conversation
+const PAGE_SIZE = 200;
+
+const $ = id => document.getElementById(id);
+const enc = encodeURIComponent;
+
+let me = null;
+let socket = null;
+let reconnectDelay = 500;
+let rooms = [];                 // all group rooms: {id, name, members}
+const convs = new Map();        // conversations I belong to: id -> {id, type, name, members, lastSeq, messages: Map(seq -> msg), unread}
+let activeId = null;
+
+// ---------- HTTP ----------
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function showError(err) {
+  const box = $('error');
+  box.textContent = err.message || String(err);
+  box.classList.remove('hidden');
+  clearTimeout(showError.timer);
+  showError.timer = setTimeout(() => box.classList.add('hidden'), 4000);
+}
+
+// ---------- State ----------
+
+function upsertConversation(c) {
+  const existing = convs.get(c.id);
+  if (existing) {
+    Object.assign(existing, { type: c.type, name: c.name, members: c.members });
+    return existing;
+  }
+  const conv = { ...c, lastSeq: 0, serverLastSeq: c.lastSeq, messages: new Map(), unread: 0 };
+  convs.set(c.id, conv);
+  return conv;
+}
+
+function title(conv) {
+  if (conv.type === 'GROUP') return '# ' + conv.name;
+  return conv.members.find(m => m !== me) || me;
+}
+
+/** Adds a message if we don't have it yet. Returns true if it was new. */
+function addMessage(conv, msg) {
+  if (conv.messages.has(msg.seq)) return false;
+  conv.messages.set(msg.seq, msg);
+  conv.lastSeq = Math.max(conv.lastSeq, msg.seq);
+  return true;
+}
+
+/** Fetches everything after the newest message we hold (or the last INITIAL_HISTORY on first load). */
+async function catchUp(conv) {
+  let afterSeq = conv.lastSeq;
+  if (conv.messages.size === 0 && conv.serverLastSeq !== undefined) {
+    afterSeq = Math.max(0, conv.serverLastSeq - INITIAL_HISTORY);
+  }
+  let added = 0;
+  for (;;) {
+    const page = await api('GET',
+      `/api/conversations/${conv.id}/messages?user=${enc(me)}&afterSeq=${afterSeq}&limit=${PAGE_SIZE}`);
+    for (const m of page.messages) if (addMessage(conv, m)) added++;
+    if (!page.hasMore || page.messages.length === 0) break;
+    afterSeq = page.messages[page.messages.length - 1].seq;
+  }
+  if (added && conv.id !== activeId) conv.unread += added;
+  if (conv.id === activeId) renderMessages();
+}
+
+async function loadConversations() {
+  const [allRooms, mine] = await Promise.all([
+    api('GET', '/api/rooms'),
+    api('GET', `/api/users/${enc(me)}/conversations`),
+  ]);
+  rooms = allRooms;
+  const mineIds = new Set(mine.map(c => c.id));
+  for (const id of [...convs.keys()]) if (!mineIds.has(id)) convs.delete(id);
+  for (const c of mine) upsertConversation(c);
+  if (activeId !== null && !convs.has(activeId)) activeId = null;
+  renderSidebar();
+  renderHeader();
+}
+
+async function catchUpAll() {
+  await Promise.all([...convs.values()].map(c => catchUp(c).catch(showError)));
+  renderSidebar();
+}
+
+// ---------- WebSocket ----------
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws?user=${enc(me)}`);
+  socket = ws;
+
+  ws.onopen = async () => {
+    reconnectDelay = 500;
+    setStatus(true);
+    // Socket is open first, then fetch: anything sent in between arrives by one path or the other,
+    // and duplicates are dropped by seq.
+    try {
+      await loadConversations();
+      await catchUpAll();
+    } catch (e) { showError(e); }
+  };
+
+  ws.onmessage = async event => {
+    const frame = JSON.parse(event.data);
+    if (frame.type !== 'message') return;
+    const msg = frame.message;
+    let conv = convs.get(msg.conversationId);
+    if (!conv) {
+      // A conversation we didn't know about (e.g. someone just started a DM with us)
+      await loadConversations().catch(showError);
+      conv = convs.get(msg.conversationId);
+      if (!conv) return;
+      await catchUp(conv).catch(showError);
+    }
+    if (msg.seq > conv.lastSeq + 1 && conv.lastSeq > 0) {
+      // Gap: we missed something; fetch it from history
+      await catchUp(conv).catch(showError);
+    }
+    if (addMessage(conv, msg) && conv.id !== activeId) conv.unread++;
+    if (conv.id === activeId) renderMessages();
+    renderSidebar();
+  };
+
+  ws.onclose = () => {
+    if (socket !== ws) return;  // replaced by logout or a newer connection
+    setStatus(false);
+    setTimeout(() => { if (socket === ws && me) connect(); }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 10_000);
+  };
+}
+
+function setStatus(online) {
+  const s = $('status');
+  s.textContent = online ? '● online' : '● reconnecting…';
+  s.className = online ? 'online' : 'offline';
+}
+
+// ---------- Rendering ----------
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v);
+  }
+  for (const c of children) if (c !== null) node.append(c);
+  return node;
+}
+
+function renderSidebar() {
+  const roomList = $('rooms');
+  roomList.replaceChildren(...rooms.map(r => {
+    const conv = convs.get(r.id);
+    const joined = !!conv;
+    return el('div', { class: 'item' + (r.id === activeId ? ' active' : ''), onclick: () => joined && select(r.id) },
+      el('span', { class: 'name' }, '# ' + r.name),
+      conv && conv.unread ? el('span', { class: 'badge' }, String(conv.unread)) : null,
+      el('span', { class: 'meta' }, String(joined ? conv.members.length : r.members.length)),
+      el('button', { onclick: e => { e.stopPropagation(); joined ? leave(r.id) : join(r.id); } },
+        joined ? 'Leave' : 'Join'));
+  }));
+
+  const dms = [...convs.values()].filter(c => c.type === 'DIRECT').sort((a, b) => title(a).localeCompare(title(b)));
+  $('dms').replaceChildren(...dms.map(c =>
+    el('div', { class: 'item' + (c.id === activeId ? ' active' : ''), onclick: () => select(c.id) },
+      el('span', { class: 'name' }, '@ ' + title(c)),
+      c.unread ? el('span', { class: 'badge' }, String(c.unread)) : null)));
+}
+
+function renderHeader() {
+  const conv = convs.get(activeId);
+  $('composer').classList.toggle('hidden', !conv);
+  if (!conv) {
+    $('title').replaceChildren(el('strong', {}, 'Pick a conversation'));
+    $('members').textContent = '';
+    $('messages').replaceChildren(el('div', { class: 'empty' }, 'Join a room or start a DM.'));
+    return;
+  }
+  $('title').replaceChildren(el('strong', {}, title(conv)));
+  $('members').textContent = 'Members: ' + conv.members.join(', ');
+}
+
+function renderMessages() {
+  const conv = convs.get(activeId);
+  if (!conv) return;
+  const box = $('messages');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const sorted = [...conv.messages.values()].sort((a, b) => a.seq - b.seq);
+  box.replaceChildren(...(sorted.length ? sorted.map(m =>
+    el('div', { class: 'msg' + (m.sender === me ? ' mine' : '') },
+      el('span', { class: 'who' }, m.sender),
+      el('span', { class: 'when' }, new Date(m.sentAt).toLocaleTimeString()),
+      el('div', { class: 'text' }, m.content)))
+    : [el('div', { class: 'empty' }, 'No messages yet.')]));
+  if (atBottom || box.dataset.conv !== String(activeId)) box.scrollTop = box.scrollHeight;
+  box.dataset.conv = String(activeId);
+}
+
+function select(id) {
+  activeId = id;
+  const conv = convs.get(id);
+  if (conv) conv.unread = 0;
+  renderSidebar();
+  renderHeader();
+  renderMessages();
+  $('text').focus();
+}
+
+// ---------- Actions ----------
+
+async function join(roomId) {
+  try {
+    await api('PUT', `/api/rooms/${roomId}/members/${enc(me)}`);
+    await loadConversations();
+    const conv = convs.get(roomId);
+    if (conv) { await catchUp(conv); conv.unread = 0; select(roomId); }
+  } catch (e) { showError(e); }
+}
+
+async function leave(roomId) {
+  try {
+    await api('DELETE', `/api/rooms/${roomId}/members/${enc(me)}`);
+    await loadConversations();
+    renderMessages();
+  } catch (e) { showError(e); }
+}
+
+$('dm-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const other = $('dm-name').value.trim();
+  if (other === me) return showError(new Error("You can't DM yourself"));
+  try {
+    const dm = await api('POST', '/api/dms', { userA: me, userB: other });
+    $('dm-name').value = '';
+    await loadConversations();
+    const conv = convs.get(dm.id);
+    if (conv) { await catchUp(conv); conv.unread = 0; select(dm.id); }
+  } catch (err) { showError(err); }
+});
+
+$('composer').addEventListener('submit', async e => {
+  e.preventDefault();
+  const input = $('text');
+  const content = input.value;
+  if (!content.trim() || activeId === null) return;
+  const conv = convs.get(activeId);
+  try {
+    const msg = await api('POST', `/api/conversations/${activeId}/messages`, { sender: me, content });
+    input.value = '';
+    // Usually the push arrives first; adding here covers a slow or reconnecting socket
+    if (conv && addMessage(conv, msg)) renderMessages();
+  } catch (err) { showError(err); }
+});
+
+// ---------- Login ----------
+
+function start(name) {
+  me = name;
+  sessionStorage.setItem('chat.user', name);
+  $('me').textContent = name;
+  $('login').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  connect();
+}
+
+$('login-form').addEventListener('submit', e => {
+  e.preventDefault();
+  start($('login-name').value.trim());
+});
+
+$('logout').addEventListener('click', () => {
+  sessionStorage.removeItem('chat.user');
+  const ws = socket;
+  socket = null;
+  me = null;
+  ws && ws.close();
+  convs.clear();
+  activeId = null;
+  $('app').classList.add('hidden');
+  $('login').classList.remove('hidden');
+  renderHeader();
+});
+
+const saved = sessionStorage.getItem('chat.user');
+if (saved) start(saved);
+</script>
+</body>
+</html>

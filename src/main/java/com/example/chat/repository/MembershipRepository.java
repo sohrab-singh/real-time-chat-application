@@ -28,6 +28,17 @@ public interface MembershipRepository extends JpaRepository<Membership, Long> {
     @Query("SELECT m.user.username FROM Membership m WHERE m.conversation.id = :conversationId ORDER BY m.user.username")
     List<String> findUsernamesByConversationId(Long conversationId);
 
+    @Query("""
+            SELECT m FROM Membership m JOIN FETCH m.conversation
+            WHERE m.user.username = :username
+            ORDER BY m.conversation.type DESC, m.conversation.name, m.conversation.id""")
+    List<Membership> findByUsernameWithConversation(String username);
+
+    @Query("""
+            SELECT m FROM Membership m JOIN FETCH m.user
+            WHERE m.conversation.id IN :conversationIds""")
+    List<Membership> findByConversationIdsWithUser(List<Long> conversationIds);
+
     @Modifying
     @Query("DELETE FROM Membership m WHERE m.conversation.id = :conversationId AND m.user.username = :username")
     void deleteByConversationIdAndUsername(Long conversationId, String username);
