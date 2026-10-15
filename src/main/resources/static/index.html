@@ -101,6 +101,7 @@ let reconnectDelay = 500;
 let rooms = [];                 // all group rooms: {id, name, members}
 const convs = new Map();        // conversations I belong to: id -> {id, type, name, members, lastSeq, messages: Map(seq -> msg), unread}
 let activeId = null;
+let pendingSend = null;         // {conversationId, content, clientMessageId}: reused if the same send is retried
 
 // ---------- HTTP ----------
 
@@ -351,13 +352,27 @@ $('composer').addEventListener('submit', async e => {
   const content = input.value;
   if (!content.trim() || activeId === null) return;
   const conv = convs.get(activeId);
+  // Retrying the same text in the same conversation reuses the id, so the server won't store it twice
+  if (!pendingSend || pendingSend.conversationId !== activeId || pendingSend.content !== content) {
+    pendingSend = { conversationId: activeId, content, clientMessageId: newId() };
+  }
+  const sending = pendingSend;
   try {
-    const msg = await api('POST', `/api/conversations/${activeId}/messages`, { sender: me, content });
-    input.value = '';
+    const msg = await api('POST', `/api/conversations/${sending.conversationId}/messages`,
+      { sender: me, content, clientMessageId: sending.clientMessageId });
+    if (pendingSend === sending) pendingSend = null;
+    if (input.value === content) input.value = '';
     // Usually the push arrives first; adding here covers a slow or reconnecting socket
-    if (conv && addMessage(conv, msg)) renderMessages();
+    if (conv && addMessage(conv, msg) && conv.id === activeId) renderMessages();
+    renderSidebar();
   } catch (err) { showError(err); }
 });
+
+function newId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  // Fallback for non-secure contexts (plain http on a non-localhost host)
+  return [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
 // ---------- Login ----------
 

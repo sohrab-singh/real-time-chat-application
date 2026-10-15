@@ -15,19 +15,27 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
+import java.util.regex.Pattern;
 
 @Service
 public class MessageService {
 
     static final int MAX_CONTENT_LENGTH = 4000;
     static final int MAX_PAGE_SIZE = 200;
+    private static final Pattern CLIENT_MESSAGE_ID = Pattern.compile("[A-Za-z0-9_-]{1,64}");
 
-    public record MessageView(Long id, Long conversationId, long seq, String sender, String content, Instant sentAt) {
+    public record MessageView(Long id, Long conversationId, long seq, String sender, String content,
+                              String clientMessageId, Instant sentAt) {
 
         static MessageView of(Message m) {
             return new MessageView(m.getId(), m.getConversation().getId(), m.getSeq(),
-                    m.getSender().getUsername(), m.getContent(), m.getSentAt());
+                    m.getSender().getUsername(), m.getContent(), m.getClientMessageId(), m.getSentAt());
         }
+    }
+
+    /** {@code created} is false when the send was a retry of an earlier one with the same client message id. */
+    public record SendResult(MessageView message, boolean created) {
     }
 
     /** {@code hasMore} means another page exists after the last message returned. */
@@ -57,22 +65,44 @@ public class MessageService {
      * Appends a message to the conversation. The conversation row is locked for the rest of the
      * transaction, so concurrent sends get consecutive sequence numbers; a failed send rolls back
      * its increment, so there are no gaps.
+     * <p>
+     * If {@code clientMessageId} is given and this sender already sent it to this conversation, the
+     * original message is returned and nothing new is stored or pushed. The lookup happens under the
+     * same lock, so two concurrent retries can't both insert.
      */
     @Transactional
-    public MessageView send(Long conversationId, String senderName, String content) {
+    public SendResult send(Long conversationId, String senderName, String content, String clientMessageId) {
         if (content == null || content.isBlank() || content.length() > MAX_CONTENT_LENGTH) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Content must be non-blank and at most " + MAX_CONTENT_LENGTH + " characters");
+        }
+        if (clientMessageId != null && !CLIENT_MESSAGE_ID.matcher(clientMessageId).matches()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "clientMessageId must be 1-64 characters: letters, digits, '_', '-'");
         }
         User sender = requireUser(senderName);
         Conversation conversation = conversations.findByIdForUpdate(conversationId)
                 .orElseThrow(() -> notFound(conversationId));
         // Checked after taking the lock, so a concurrent leave can't slip in between check and insert
         requireMember(conversationId, sender);
-        Message message = messages.save(new Message(conversation, sender, conversation.nextSeq(), content));
+
+        if (clientMessageId != null) {
+            Optional<Message> earlier = messages.findByConversationIdAndSenderIdAndClientMessageId(
+                    conversationId, sender.getId(), clientMessageId);
+            if (earlier.isPresent()) {
+                if (!earlier.get().getContent().equals(content)) {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "clientMessageId " + clientMessageId + " was already used for a different message");
+                }
+                return new SendResult(MessageView.of(earlier.get()), false);
+            }
+        }
+
+        Message message = messages.save(
+                new Message(conversation, sender, conversation.nextSeq(), content, clientMessageId));
         MessageView view = MessageView.of(message);
         events.publishEvent(new MessageSentEvent(view, memberships.findUsernamesByConversationId(conversationId)));
-        return view;
+        return new SendResult(view, true);
     }
 
     /** Messages with {@code seq > afterSeq}, oldest first. Members only. */

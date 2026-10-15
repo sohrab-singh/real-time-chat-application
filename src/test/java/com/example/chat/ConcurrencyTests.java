@@ -66,7 +66,7 @@ class ConcurrencyTests {
         for (int i = 0; i < n; i++) {
             String sender = i % 2 == 0 ? alice : bob;
             String content = "msg " + i;
-            sends.add(() -> messages.send(dmId, sender, content).seq());
+            sends.add(() -> messages.send(dmId, sender, content, null).message().seq());
         }
         List<Long> returnedSeqs = runConcurrently(sends);
 

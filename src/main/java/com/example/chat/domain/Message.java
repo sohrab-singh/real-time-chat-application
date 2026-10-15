@@ -16,7 +16,11 @@ import java.time.temporal.ChronoUnit;
 
 @Entity
 @Table(name = "messages",
-        uniqueConstraints = @UniqueConstraint(columnNames = {"conversation_id", "seq"}))
+        uniqueConstraints = {
+                @UniqueConstraint(columnNames = {"conversation_id", "seq"}),
+                // Backstop for idempotent sends; nulls are distinct, so messages without an id never collide
+                @UniqueConstraint(columnNames = {"conversation_id", "sender_id", "client_message_id"})
+        })
 public class Message {
 
     @Id
@@ -38,17 +42,22 @@ public class Message {
     @Column(nullable = false, columnDefinition = "text")
     private String content;
 
+    /** Optional id chosen by the client so a retried send returns the original message instead of a duplicate. */
+    @Column(length = 64)
+    private String clientMessageId;
+
     @Column(nullable = false)
     private Instant sentAt;
 
     protected Message() {
     }
 
-    public Message(Conversation conversation, User sender, long seq, String content) {
+    public Message(Conversation conversation, User sender, long seq, String content, String clientMessageId) {
         this.conversation = conversation;
         this.sender = sender;
         this.seq = seq;
         this.content = content;
+        this.clientMessageId = clientMessageId;
         // Postgres stores microseconds; truncate so the live push and history report the same value
         this.sentAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
@@ -71,6 +80,10 @@ public class Message {
 
     public String getContent() {
         return content;
+    }
+
+    public String getClientMessageId() {
+        return clientMessageId;
     }
 
     public Instant getSentAt() {

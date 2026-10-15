@@ -32,7 +32,7 @@ class HistoryTests {
         String bob = "bob-" + System.nanoTime();
         Long dmId = dms.getOrCreate(alice, bob).id();
         for (int i = 1; i <= 5; i++) {
-            messages.send(dmId, i % 2 == 0 ? bob : alice, "m" + i);
+            messages.send(dmId, i % 2 == 0 ? bob : alice, "m" + i, null);
         }
 
         HistoryPage first = messages.history(dmId, bob, 0, 2);
@@ -58,7 +58,7 @@ class HistoryTests {
         assertThatThrownBy(() -> messages.history(dmId, carol, 0, 10))
                 .isInstanceOfSatisfying(ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN));
-        assertThatThrownBy(() -> messages.send(dmId, carol, "hi"))
+        assertThatThrownBy(() -> messages.send(dmId, carol, "hi", null))
                 .isInstanceOfSatisfying(ResponseStatusException.class,
                         e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN));
     }
