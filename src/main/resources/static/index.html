@@ -99,9 +99,13 @@ let me = null;
 let socket = null;
 let reconnectDelay = 500;
 let rooms = [];                 // all group rooms: {id, name, members}
-const convs = new Map();        // conversations I belong to: id -> {id, type, name, members, lastSeq, messages: Map(seq -> msg), unread}
+// Conversations I belong to: id -> {id, type, name, members, messages: Map(seq -> msg),
+//   heldSeq: highest seq we hold, latestSeq: highest seq we know exists, lastReadSeq: my read pointer}.
+// Seqs have no gaps, so unread = latestSeq - lastReadSeq.
+const convs = new Map();
 let activeId = null;
 let pendingSend = null;         // {conversationId, content, clientMessageId}: reused if the same send is retried
+const readTimers = new Map();   // conversationId -> debounce timer for PUT /read
 
 // ---------- HTTP ----------
 
@@ -130,14 +134,16 @@ function showError(err) {
 // ---------- State ----------
 
 function upsertConversation(c) {
-  const existing = convs.get(c.id);
-  if (existing) {
-    Object.assign(existing, { type: c.type, name: c.name, members: c.members });
-    return existing;
-  }
-  const conv = { ...c, lastSeq: 0, serverLastSeq: c.lastSeq, messages: new Map(), unread: 0 };
+  const conv = convs.get(c.id) || { id: c.id, messages: new Map(), heldSeq: 0, latestSeq: 0, lastReadSeq: 0 };
+  Object.assign(conv, { type: c.type, name: c.name, members: c.members });
+  conv.latestSeq = Math.max(conv.latestSeq, c.lastSeq);
+  conv.lastReadSeq = Math.max(conv.lastReadSeq, c.lastReadSeq);
   convs.set(c.id, conv);
   return conv;
+}
+
+function unread(conv) {
+  return Math.max(0, conv.latestSeq - conv.lastReadSeq);
 }
 
 function title(conv) {
@@ -149,26 +155,35 @@ function title(conv) {
 function addMessage(conv, msg) {
   if (conv.messages.has(msg.seq)) return false;
   conv.messages.set(msg.seq, msg);
-  conv.lastSeq = Math.max(conv.lastSeq, msg.seq);
+  conv.heldSeq = Math.max(conv.heldSeq, msg.seq);
+  conv.latestSeq = Math.max(conv.latestSeq, msg.seq);
+  if (msg.sender === me) conv.lastReadSeq = Math.max(conv.lastReadSeq, msg.seq);  // own messages are read
   return true;
 }
 
 /** Fetches everything after the newest message we hold (or the last INITIAL_HISTORY on first load). */
 async function catchUp(conv) {
-  let afterSeq = conv.lastSeq;
-  if (conv.messages.size === 0 && conv.serverLastSeq !== undefined) {
-    afterSeq = Math.max(0, conv.serverLastSeq - INITIAL_HISTORY);
-  }
-  let added = 0;
+  let afterSeq = conv.messages.size === 0 ? Math.max(0, conv.latestSeq - INITIAL_HISTORY) : conv.heldSeq;
   for (;;) {
     const page = await api('GET',
       `/api/conversations/${conv.id}/messages?user=${enc(me)}&afterSeq=${afterSeq}&limit=${PAGE_SIZE}`);
-    for (const m of page.messages) if (addMessage(conv, m)) added++;
+    for (const m of page.messages) addMessage(conv, m);
     if (!page.hasMore || page.messages.length === 0) break;
     afterSeq = page.messages[page.messages.length - 1].seq;
   }
-  if (added && conv.id !== activeId) conv.unread += added;
   if (conv.id === activeId) renderMessages();
+}
+
+/** If the user is looking at the conversation, mark what's on screen as read (debounced to the server). */
+function markReadIfVisible(conv) {
+  if (!conv || conv.id !== activeId || document.visibilityState !== 'visible') return;
+  if (conv.heldSeq <= conv.lastReadSeq) return;
+  conv.lastReadSeq = conv.heldSeq;
+  clearTimeout(readTimers.get(conv.id));
+  readTimers.set(conv.id, setTimeout(() => {
+    api('PUT', `/api/conversations/${conv.id}/read`, { user: me, seq: conv.lastReadSeq }).catch(showError);
+  }, 300));
+  renderSidebar();
 }
 
 async function loadConversations() {
@@ -220,11 +235,11 @@ function connect() {
       if (!conv) return;
       await catchUp(conv).catch(showError);
     }
-    if (msg.seq > conv.lastSeq + 1 && conv.lastSeq > 0) {
+    if (msg.seq > conv.heldSeq + 1 && conv.heldSeq > 0) {
       // Gap: we missed something; fetch it from history
       await catchUp(conv).catch(showError);
     }
-    if (addMessage(conv, msg) && conv.id !== activeId) conv.unread++;
+    addMessage(conv, msg);
     if (conv.id === activeId) renderMessages();
     renderSidebar();
   };
@@ -262,7 +277,7 @@ function renderSidebar() {
     const joined = !!conv;
     return el('div', { class: 'item' + (r.id === activeId ? ' active' : ''), onclick: () => joined && select(r.id) },
       el('span', { class: 'name' }, '# ' + r.name),
-      conv && conv.unread ? el('span', { class: 'badge' }, String(conv.unread)) : null,
+      conv && unread(conv) ? el('span', { class: 'badge' }, String(unread(conv))) : null,
       el('span', { class: 'meta' }, String(joined ? conv.members.length : r.members.length)),
       el('button', { onclick: e => { e.stopPropagation(); joined ? leave(r.id) : join(r.id); } },
         joined ? 'Leave' : 'Join'));
@@ -272,7 +287,7 @@ function renderSidebar() {
   $('dms').replaceChildren(...dms.map(c =>
     el('div', { class: 'item' + (c.id === activeId ? ' active' : ''), onclick: () => select(c.id) },
       el('span', { class: 'name' }, '@ ' + title(c)),
-      c.unread ? el('span', { class: 'badge' }, String(c.unread)) : null)));
+      unread(c) ? el('span', { class: 'badge' }, String(unread(c))) : null)));
 }
 
 function renderHeader() {
@@ -302,12 +317,11 @@ function renderMessages() {
     : [el('div', { class: 'empty' }, 'No messages yet.')]));
   if (atBottom || box.dataset.conv !== String(activeId)) box.scrollTop = box.scrollHeight;
   box.dataset.conv = String(activeId);
+  markReadIfVisible(conv);
 }
 
 function select(id) {
   activeId = id;
-  const conv = convs.get(id);
-  if (conv) conv.unread = 0;
   renderSidebar();
   renderHeader();
   renderMessages();
@@ -321,7 +335,7 @@ async function join(roomId) {
     await api('PUT', `/api/rooms/${roomId}/members/${enc(me)}`);
     await loadConversations();
     const conv = convs.get(roomId);
-    if (conv) { await catchUp(conv); conv.unread = 0; select(roomId); }
+    if (conv) { await catchUp(conv); select(roomId); }
   } catch (e) { showError(e); }
 }
 
@@ -342,7 +356,7 @@ $('dm-form').addEventListener('submit', async e => {
     $('dm-name').value = '';
     await loadConversations();
     const conv = convs.get(dm.id);
-    if (conv) { await catchUp(conv); conv.unread = 0; select(dm.id); }
+    if (conv) { await catchUp(conv); select(dm.id); }
   } catch (err) { showError(err); }
 });
 
@@ -373,6 +387,8 @@ function newId() {
   // Fallback for non-secure contexts (plain http on a non-localhost host)
   return [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
 }
+
+document.addEventListener('visibilitychange', () => markReadIfVisible(convs.get(activeId)));
 
 // ---------- Login ----------
 

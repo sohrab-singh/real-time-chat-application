@@ -100,9 +100,26 @@ public class MessageService {
 
         Message message = messages.save(
                 new Message(conversation, sender, conversation.nextSeq(), content, clientMessageId));
+        // Your own message counts as read
+        memberships.advanceLastRead(conversationId, sender.getId(), message.getSeq());
         MessageView view = MessageView.of(message);
         events.publishEvent(new MessageSentEvent(view, memberships.findUsernamesByConversationId(conversationId)));
         return new SendResult(view, true);
+    }
+
+    /** Marks messages up to {@code seq} as read for the user. Idempotent; never moves the pointer back. */
+    @Transactional
+    public void markRead(Long conversationId, String username, long seq) {
+        if (seq < 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "seq must be >= 0");
+        }
+        User user = requireUser(username);
+        if (!conversations.existsById(conversationId)) {
+            throw notFound(conversationId);
+        }
+        if (memberships.advanceLastRead(conversationId, user.getId(), seq) == 0) {
+            throw notMember();
+        }
     }
 
     /** Messages with {@code seq > afterSeq}, oldest first. Members only. */

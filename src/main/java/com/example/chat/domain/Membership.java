@@ -33,6 +33,10 @@ public class Membership {
     @Column(nullable = false)
     private Instant joinedAt;
 
+    /** Highest seq this member has read; unread count is {@code conversation.lastSeq - lastReadSeq}. */
+    @Column(nullable = false)
+    private long lastReadSeq;
+
     protected Membership() {
     }
 
@@ -56,5 +60,9 @@ public class Membership {
 
     public Instant getJoinedAt() {
         return joinedAt;
+    }
+
+    public long getLastReadSeq() {
+        return lastReadSeq;
     }
 }

@@ -14,8 +14,12 @@ import java.util.stream.Collectors;
 @Service
 public class ConversationService {
 
-    /** {@code members} lists everyone in the conversation, including the requesting user. */
-    public record ConversationView(Long id, ConversationType type, String name, List<String> members, long lastSeq) {
+    /**
+     * {@code members} lists everyone in the conversation, including the requesting user. Because seqs
+     * have no gaps, {@code unreadCount} is exactly {@code lastSeq - lastReadSeq}.
+     */
+    public record ConversationView(Long id, ConversationType type, String name, List<String> members,
+                                   long lastSeq, long lastReadSeq, long unreadCount) {
     }
 
     private final MembershipRepository memberships;
@@ -32,18 +36,22 @@ public class ConversationService {
         if (users.find(username).isEmpty()) {
             return List.of();
         }
-        List<Conversation> mine = memberships.findByUsernameWithConversation(username).stream()
-                .map(Membership::getConversation).toList();
-        if (mine.isEmpty()) {
+        List<Membership> myMemberships = memberships.findByUsernameWithConversation(username);
+        if (myMemberships.isEmpty()) {
             return List.of();
         }
+        List<Conversation> mine = myMemberships.stream().map(Membership::getConversation).toList();
         Map<Long, List<String>> membersById = memberships
                 .findByConversationIdsWithUser(mine.stream().map(Conversation::getId).toList()).stream()
                 .collect(Collectors.groupingBy(m -> m.getConversation().getId(),
                         Collectors.mapping(m -> m.getUser().getUsername(), Collectors.toList())));
-        return mine.stream()
-                .map(c -> new ConversationView(c.getId(), c.getType(), c.getName(),
-                        membersById.getOrDefault(c.getId(), List.of()).stream().sorted().toList(), c.getLastSeq()))
+        return myMemberships.stream()
+                .map(m -> {
+                    Conversation c = m.getConversation();
+                    List<String> members = membersById.getOrDefault(c.getId(), List.of()).stream().sorted().toList();
+                    return new ConversationView(c.getId(), c.getType(), c.getName(), members,
+                            c.getLastSeq(), m.getLastReadSeq(), c.getLastSeq() - m.getLastReadSeq());
+                })
                 .toList();
     }
 }
