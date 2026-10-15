@@ -2,7 +2,9 @@ package com.example.chat.repository;
 
 import com.example.chat.domain.Conversation;
 import com.example.chat.domain.ConversationType;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 
@@ -16,6 +18,11 @@ public interface ConversationRepository extends JpaRepository<Conversation, Long
     Optional<Conversation> findByIdAndType(Long id, ConversationType type);
 
     Optional<Conversation> findByDirectKey(String directKey);
+
+    /** SELECT ... FOR UPDATE: serializes concurrent senders on the same conversation until commit. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT c FROM Conversation c WHERE c.id = :id")
+    Optional<Conversation> findByIdForUpdate(Long id);
 
     /**
      * Creates the direct conversation if missing. Under concurrent calls for the same key, Postgres

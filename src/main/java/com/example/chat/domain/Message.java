@@ -12,6 +12,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 @Entity
 @Table(name = "messages",
@@ -48,7 +49,8 @@ public class Message {
         this.sender = sender;
         this.seq = seq;
         this.content = content;
-        this.sentAt = Instant.now();
+        // Postgres stores microseconds; truncate so the live push and history report the same value
+        this.sentAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
 
     public Long getId() {
