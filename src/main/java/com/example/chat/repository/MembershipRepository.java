@@ -23,6 +23,11 @@ public interface MembershipRepository extends JpaRepository<Membership, Long> {
             ON CONFLICT (conversation_id, user_id) DO NOTHING""", nativeQuery = true)
     void insertIfAbsent(Long conversationId, Long userId);
 
+    boolean existsByConversationIdAndUserId(Long conversationId, Long userId);
+
+    @Query("SELECT m.user.username FROM Membership m WHERE m.conversation.id = :conversationId ORDER BY m.user.username")
+    List<String> findUsernamesByConversationId(Long conversationId);
+
     @Modifying
     @Query("DELETE FROM Membership m WHERE m.conversation.id = :conversationId AND m.user.username = :username")
     void deleteByConversationIdAndUsername(Long conversationId, String username);
